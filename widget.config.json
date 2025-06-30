@@ -3,15 +3,15 @@
   "spaceId": "spcsmvLQdmLqm",
   "entry": "./src/index.tsx",
   "name": {
-    "zh-CN": "下载视图为excel",
-    "en-US": "下载视图为excel"
+    "zh-CN": "下载视图为Excel",
+    "en-US": "下载视图为Excel"
   },
   "icon": "./package_icon.png",
   "cover": "./cover.png",
   "authorIcon": "./author_icon.png",
   "description": {
-    "zh-CN": "下载视图为excel 的描述",
-    "en-US": "下载视图为excel description"
+    "zh-CN": "下载视图为Excel 的描述",
+    "en-US": "下载视图为Excel description"
   },
   "sandbox": true
 }

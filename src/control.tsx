@@ -10,6 +10,8 @@ export const Control: React.FC = () => {
   const allRecords = useRecords(viewId);
   const fields = useFields(viewId);
   const viewMeta = useViewMeta(viewId);
+  const [isDownloading, setIsDownloading] = React.useState(false);
+  const [downloadProgress, setDownloadProgress] = React.useState('');
 
   // 配置常量
   const ROW_HEIGHT = 25;
@@ -97,8 +99,12 @@ export const Control: React.FC = () => {
   };
 
   const exportToExcel = async () => {
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet('工作表');
+    setIsDownloading(true);
+    setDownloadProgress('正在准备数据...');
+
+    try {
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('工作表');
 
 
 
@@ -132,54 +138,76 @@ export const Control: React.FC = () => {
       worksheet.getColumn(index + 1).width = COLUMN_WIDTH;
     });
 
-    // 处理每条记录
-    for (const record of allRecords) {
-      // 为每个记录添加一行，附件字段留空，其他字段使用文本值
-      const rowData = viewFields.map(field => {
-        if (field.type === FieldType.Attachment) {
-          return ''; // 附件字段留空，稍后用图片填充
-        }
-        return record.getCellValueString(field.id);
-      });
-      const row = worksheet.addRow(rowData);
+      // 处理每条记录
+      setDownloadProgress('正在处理数据...');
+      for (let recordIndex = 0; recordIndex < allRecords.length; recordIndex++) {
+        const record = allRecords[recordIndex];
+        setDownloadProgress(`正在处理第 ${recordIndex + 1}/${allRecords.length} 条记录...`);
 
-      // 判断是否有附件字段来决定行高
-      const hasAttachments = viewFields.some(field => {
-        const attachments = record.getCellValue(field.id);
-        return field.type === FieldType.Attachment && attachments && Array.isArray(attachments) && attachments[0];
-      });
-      row.height = hasAttachments ? ROW_HEIGHT : 15;
+        // 为每个记录添加一行，附件字段留空，其他字段使用文本值
+        const rowData = viewFields.map(field => {
+          if (field.type === FieldType.Attachment) {
+            return ''; // 附件字段留空，稍后用图片填充
+          }
+          return record.getCellValueString(field.id);
+        });
+        const row = worksheet.addRow(rowData);
 
-      // 设置数据行单元格样式
-      row.eachCell((cell) => {
-        cell.alignment = {
-          vertical: 'middle',
-          horizontal: 'left',
-          wrapText: false
-        };
-      });
-
-      // 处理附件字段
-      for (let i = 0; i < viewFields.length; i++) {
-        const field = viewFields[i];
-        if (field.type === FieldType.Attachment) {
+        // 判断是否有附件字段来决定行高
+        const hasAttachments = viewFields.some(field => {
           const attachments = record.getCellValue(field.id);
-          if (attachments && Array.isArray(attachments) && attachments[0]) {
-            await processAttachment(attachments[0], workbook, worksheet, row, i);
+          return field.type === FieldType.Attachment && attachments && Array.isArray(attachments) && attachments[0];
+        });
+        row.height = hasAttachments ? ROW_HEIGHT : 15;
+
+        // 设置数据行单元格样式
+        row.eachCell((cell) => {
+          cell.alignment = {
+            vertical: 'middle',
+            horizontal: 'left',
+            wrapText: false
+          };
+        });
+
+        // 处理附件字段
+        for (let i = 0; i < viewFields.length; i++) {
+          const field = viewFields[i];
+          if (field.type === FieldType.Attachment) {
+            const attachments = record.getCellValue(field.id);
+            if (attachments && Array.isArray(attachments) && attachments[0]) {
+              setDownloadProgress(`正在处理第 ${recordIndex + 1}/${allRecords.length} 条记录...`);
+              await processAttachment(attachments[0], workbook, worksheet, row, i);
+            }
           }
         }
       }
-    }
 
-    // 下载文件
-    const buffer = await workbook.xlsx.writeBuffer();
-    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = generateFileName();
-    a.click();
-    window.URL.revokeObjectURL(url);
+      // 下载文件
+      setDownloadProgress('正在生成Excel文件...');
+      const buffer = await workbook.xlsx.writeBuffer();
+
+      setDownloadProgress('正在准备下载...');
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = generateFileName();
+      a.click();
+      window.URL.revokeObjectURL(url);
+
+      setDownloadProgress('下载完成！');
+      setTimeout(() => {
+        setIsDownloading(false);
+        setDownloadProgress('');
+      }, 1000);
+    } catch (error) {
+      console.error('导出失败:', error);
+      setDownloadProgress('导出失败，请重试');
+      setTimeout(() => {
+        setIsDownloading(false);
+        setDownloadProgress('');
+      }, 2000);
+    }
   };
 
   return (
@@ -191,19 +219,20 @@ export const Control: React.FC = () => {
     }}>
       <Button
         onClick={exportToExcel}
+        disabled={isDownloading}
         size="large"
         style={{
-          backgroundColor: '#1890ff',
-          color: 'white',
+          backgroundColor: isDownloading ? '#d9d9d9' : '#1890ff',
+          color: isDownloading ? 'black' : 'white',
           border: 'none',
           padding: '12px 24px',
           fontSize: '16px',
           fontWeight: 'bold',
           borderRadius: '6px',
-          cursor: 'pointer'
+          cursor: isDownloading ? 'not-allowed' : 'pointer'
         }}
       >
-        下载当前视图为EXCEL
+        {isDownloading ? (downloadProgress || '正在下载...') : '下载当前视图为EXCEL'}
       </Button>
     </div>
   );
