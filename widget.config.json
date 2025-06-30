@@ -1,0 +1,17 @@
+{
+  "packageId": "wpkjK7sxhEd8f",
+  "spaceId": "spcsmvLQdmLqm",
+  "entry": "./src/index.tsx",
+  "name": {
+    "zh-CN": "下载视图为excel",
+    "en-US": "下载视图为excel"
+  },
+  "icon": "./package_icon.png",
+  "cover": "./cover.png",
+  "authorIcon": "./author_icon.png",
+  "description": {
+    "zh-CN": "下载视图为excel 的描述",
+    "en-US": "下载视图为excel description"
+  },
+  "sandbox": true
+}
