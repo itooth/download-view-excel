@@ -12,6 +12,7 @@ export const Control: React.FC = () => {
   const viewMeta = useViewMeta(viewId);
   const [isDownloading, setIsDownloading] = React.useState(false);
   const [downloadProgress, setDownloadProgress] = React.useState('');
+  const [downloadSubtitle, setDownloadSubtitle] = React.useState('');
 
   // 配置常量
   const ROW_HEIGHT = 25;
@@ -58,44 +59,56 @@ export const Control: React.FC = () => {
     });
   };
 
-  // 处理单个附件的函数
-  const processAttachment = async (attachment: any, workbook: ExcelJS.Workbook, worksheet: ExcelJS.Worksheet, row: ExcelJS.Row, colIndex: number) => {
-    try {
-      const response = await fetch(attachment.url);
-      const buffer = await response.arrayBuffer();
+  // 批量处理附件的纯函数
+  const processAttachmentBatch = async (tasks: any[], completedImages: number, totalImages: number, startTime: number) => {
+    const results = await Promise.allSettled(
+      tasks.map(async ({ attachment, workbook, worksheet, row, colIndex }, index) => {
+        const response = await fetch(attachment.url);
+        const buffer = await response.arrayBuffer();
+        const blob = new Blob([buffer]);
+        const imageUrl = URL.createObjectURL(blob);
+        const img = new Image();
 
-      const blob = new Blob([buffer]);
-      const imageUrl = URL.createObjectURL(blob);
-      const img = new Image();
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = imageUrl;
+        });
 
-      await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = reject;
-        img.src = imageUrl;
-      });
+        const compressedBuffer = await compressImageToJpg(img, IMAGE_QUALITY);
+        URL.revokeObjectURL(imageUrl);
 
-      const aspectRatio = img.width / img.height;
-      const calculatedWidth = IMAGE_HEIGHT * aspectRatio;
+        const imageId = workbook.addImage({
+          buffer: compressedBuffer,
+          extension: 'jpeg',
+        });
 
-      // 压缩图片为JPG格式
-      const compressedBuffer = await compressImageToJpg(img, IMAGE_QUALITY);
+        worksheet.addImage(imageId, {
+          tl: { col: colIndex, row: row.number - 1 } as any,
+          ext: { width: IMAGE_HEIGHT * (img.width / img.height), height: IMAGE_HEIGHT },
+          editAs: undefined as any
+        });
 
-      URL.revokeObjectURL(imageUrl);
+        // 更新进度和预估时间
+        const currentCompleted = completedImages + index + 1;
+        const percentage = Math.round((currentCompleted / totalImages) * 100);
+        const elapsed = (Date.now() - startTime) / 1000;
+        const avgTimePerImage = elapsed / currentCompleted;
+        const remainingImages = totalImages - currentCompleted;
+        const estimatedSeconds = Math.round(remainingImages * avgTimePerImage);
 
-      const imageId = workbook.addImage({
-        buffer: compressedBuffer,
-        extension: 'jpeg',
-      });
+        setDownloadProgress(`${percentage}% 下载中`);
+        setDownloadSubtitle(`初次下载较慢，约剩余${estimatedSeconds}秒`);
+      })
+    );
 
-      worksheet.addImage(imageId, {
-        tl: { col: colIndex, row: row.number - 1 } as any,
-        ext: { width: calculatedWidth, height: IMAGE_HEIGHT },
-        editAs: undefined as any
-      });
-    } catch (error) {
-      console.error('Failed to process attachment:', error);
-      row.getCell(colIndex + 1).value = attachment.name;
-    }
+    // 处理失败的附件
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        const { row, colIndex, attachment } = tasks[index];
+        row.getCell(colIndex + 1).value = attachment.name;
+      }
+    });
   };
 
   const exportToExcel = async () => {
@@ -138,55 +151,62 @@ export const Control: React.FC = () => {
       worksheet.getColumn(index + 1).width = COLUMN_WIDTH;
     });
 
-      // 处理每条记录
+      // 收集所有附件任务
       setDownloadProgress('正在处理数据...');
+      const attachmentTasks: any[] = [];
+
       for (let recordIndex = 0; recordIndex < allRecords.length; recordIndex++) {
         const record = allRecords[recordIndex];
-        setDownloadProgress(`正在处理第 ${recordIndex + 1}/${allRecords.length} 条记录...`);
 
-        // 为每个记录添加一行，附件字段留空，其他字段使用文本值
-        const rowData = viewFields.map(field => {
-          if (field.type === FieldType.Attachment) {
-            return ''; // 附件字段留空，稍后用图片填充
-          }
-          return record.getCellValueString(field.id);
-        });
+        const rowData = viewFields.map(field =>
+          field.type === FieldType.Attachment ? '' : record.getCellValueString(field.id)
+        );
         const row = worksheet.addRow(rowData);
 
-        // 判断是否有附件字段来决定行高
         const hasAttachments = viewFields.some(field => {
           const attachments = record.getCellValue(field.id);
-          return field.type === FieldType.Attachment && attachments && Array.isArray(attachments) && attachments[0];
+          return field.type === FieldType.Attachment && attachments?.[0];
         });
         row.height = hasAttachments ? ROW_HEIGHT : 15;
 
-        // 设置数据行单元格样式
         row.eachCell((cell) => {
-          cell.alignment = {
-            vertical: 'middle',
-            horizontal: 'left',
-            wrapText: false
-          };
+          cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: false };
         });
 
-        // 处理附件字段
-        for (let i = 0; i < viewFields.length; i++) {
-          const field = viewFields[i];
+        // 收集附件任务而不是立即处理
+        viewFields.forEach((field, i) => {
           if (field.type === FieldType.Attachment) {
             const attachments = record.getCellValue(field.id);
-            if (attachments && Array.isArray(attachments) && attachments[0]) {
-              setDownloadProgress(`正在处理第 ${recordIndex + 1}/${allRecords.length} 条记录...`);
-              await processAttachment(attachments[0], workbook, worksheet, row, i);
+            if (attachments?.[0]) {
+              attachmentTasks.push({ attachment: attachments[0], workbook, worksheet, row, colIndex: i });
             }
           }
+        });
+      }
+
+      // 分批并发处理附件
+      const BATCH_SIZE = 30;
+      const startTime = Date.now();
+
+      if (attachmentTasks.length === 0) {
+        setDownloadProgress('准备生成文件');
+        setDownloadSubtitle('');
+      } else {
+        setDownloadProgress('0% 下载中');
+        setDownloadSubtitle('初次下载较慢，正在计算剩余时间...');
+
+        for (let i = 0; i < attachmentTasks.length; i += BATCH_SIZE) {
+          const batch = attachmentTasks.slice(i, i + BATCH_SIZE);
+          await processAttachmentBatch(batch, i, attachmentTasks.length, startTime);
         }
       }
 
       // 下载文件
-      setDownloadProgress('正在生成Excel文件...');
+      setDownloadProgress('生成Excel文件');
+      setDownloadSubtitle('');
       const buffer = await workbook.xlsx.writeBuffer();
 
-      setDownloadProgress('正在准备下载...');
+      setDownloadProgress('准备下载');
       const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -199,14 +219,17 @@ export const Control: React.FC = () => {
       setTimeout(() => {
         setIsDownloading(false);
         setDownloadProgress('');
-      }, 1000);
+        setDownloadSubtitle('');
+      }, 1500);
     } catch (error) {
       console.error('导出失败:', error);
       setDownloadProgress('导出失败，请重试');
+      setDownloadSubtitle('');
       setTimeout(() => {
         setIsDownloading(false);
         setDownloadProgress('');
-      }, 2000);
+        setDownloadSubtitle('');
+      }, 3000);
     }
   };
 
@@ -214,6 +237,7 @@ export const Control: React.FC = () => {
     <div style={{
       height: '100vh',
       display: 'flex',
+      flexDirection: 'column',
       justifyContent: 'center',
       alignItems: 'center'
     }}>
@@ -234,6 +258,16 @@ export const Control: React.FC = () => {
       >
         {isDownloading ? (downloadProgress || '正在下载...') : '下载当前视图为EXCEL'}
       </Button>
+      {isDownloading && downloadSubtitle && (
+        <div style={{
+          marginTop: '8px',
+          fontSize: '12px',
+          color: '#666',
+          textAlign: 'center'
+        }}>
+          {downloadSubtitle}
+        </div>
+      )}
     </div>
   );
 };
