@@ -1,6 +1,6 @@
 import { Button } from '@apitable/components';
 import {
-  useRecords, useActiveViewId, useFields, FieldType, useViewMeta
+  useRecords, useActiveViewId, useFields, FieldType, useViewMeta, useViewsMeta
 } from '@apitable/widget-sdk';
 import React from 'react';
 import ExcelJS from 'exceljs';
@@ -10,15 +10,24 @@ export const Control: React.FC = () => {
   const allRecords = useRecords(viewId);
   const fields = useFields(viewId);
   const viewMeta = useViewMeta(viewId);
+  const viewsMeta = useViewsMeta();
   const [isDownloading, setIsDownloading] = React.useState(false);
   const [downloadProgress, setDownloadProgress] = React.useState('');
   const [downloadSubtitle, setDownloadSubtitle] = React.useState('');
 
+  // 上到下：title row, header row, banner row, content rows
+  // 打印分组信息
+  React.useEffect(() => {
+    const currentView = viewsMeta.find(view => view.id === viewId);
+    console.log('=== 分组信息完整返回 ===');
+    console.log('groupInfo:', currentView?.groupInfo);
+  }, [viewId, viewsMeta]);
+
   // 配置常量
-  const ROW_HEIGHT = 25;
+  const IMAGE_ROW_HEIGHT = 35; // 包含图片的行高度
   const IMAGE_HEIGHT = 30;
-  const COLUMN_WIDTH = 10;
   const IMAGE_QUALITY = 0.3; // 图片压缩质量 (0.1-1.0，越高质量越好文件越大)
+  const GROUP_BANNER_HEIGHT = 20; // 分组banner行高度
 
   // 获取当前视图显示的字段（过滤掉隐藏字段）
   const viewFields = fields.filter(field => {
@@ -34,7 +43,7 @@ export const Control: React.FC = () => {
     const day = String(today.getDate()).padStart(2, '0');
     const dateStr = `${month}${day}`;
     const viewName = viewMeta?.name || '视图';
-    return `${viewName}下载${dateStr}.xlsx`;
+    return `《${viewName}》${dateStr}.xlsx`;
   };
 
   // 压缩图片为JPG格式的函数
@@ -121,64 +130,149 @@ export const Control: React.FC = () => {
 
 
 
-    // 动态生成表头（使用当前视图的所有字段）
+    // 添加title row
+    const titleText = generateFileName().replace('.xlsx', '');
+    const titleRow = worksheet.addRow([titleText]);
+    worksheet.mergeCells(1, 1, 1, viewFields.length);
+    titleRow.height = 50;
+    titleRow.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
+    titleRow.getCell(1).font = { bold: true, size: 16 };
+    titleRow.getCell(1).border = {
+      right: { style: 'thick', color: { argb: 'FF000000' } }
+    };
+
+    // 添加header row
     const headers = viewFields.map(field => field.name);
     const headerRow = worksheet.addRow(headers);
 
-    // 设置表头行样式
+    // 设置header row样式
     headerRow.height = 50;
-    headerRow.eachCell((cell) => {
+    headerRow.eachCell((cell, colNumber) => {
       cell.alignment = {
         vertical: 'middle',
-        horizontal: 'left',
+        horizontal: 'center',
         wrapText: true
       };
       cell.fill = {
         type: 'pattern',
         pattern: 'solid',
-        fgColor: { argb: 'FFC4D79B' }
+        fgColor: { argb: 'FF3373C9' }
       };
+      cell.font = {
+        color: { argb: 'FFFFFFFF' },  // 白色字体
+        bold: true                    // 可选：设置为粗体
+      };
+
+      const isLastColumn = colNumber === viewFields.length;
       cell.border = {
         top: { style: 'thin', color: { argb: 'FF000000' } },
         left: { style: 'thin', color: { argb: 'FF000000' } },
         bottom: { style: 'thin', color: { argb: 'FF000000' } },
-        right: { style: 'thin', color: { argb: 'FF000000' } }
+        right: isLastColumn ? { style: 'thick', color: { argb: 'FF000000' } } : { style: 'thin', color: { argb: 'FF000000' } }
       };
     });
 
-    // 设置列宽（所有列统一宽度）
-    headers.forEach((_, index) => {
-      worksheet.getColumn(index + 1).width = COLUMN_WIDTH;
+    // 根据前20行数据计算列宽
+    const calculateTextWidth = (text: string): number => {
+      if (!text) return 8;
+      let width = 0;
+      for (const char of text) {
+        width += /[\u4e00-\u9fa5]/.test(char) ? 1.8 : 1.0; // 中文2.2倍，英文1倍
+      }
+      return Math.max(8, Math.min(width + 2, 25)); // 最小8，最大25，加2个字符padding
+    };
+
+    viewFields.forEach((field, index) => {
+      let maxWidth = 8; // 最小宽度，不考虑表头
+      const sampleSize = Math.min(100, allRecords.length); // 根据前100行数据计算列宽
+      for (let i = 0; i < sampleSize; i++) {
+        const cellValue = allRecords[i].getCellValueString(field.id) || '';
+        maxWidth = Math.max(maxWidth, calculateTextWidth(cellValue));
+      }
+      worksheet.getColumn(index + 1).width = maxWidth;
     });
 
       // 收集所有附件任务
       setDownloadProgress('正在处理数据...');
       const attachmentTasks: any[] = [];
 
+      // 获取分组字段ID并统计分组数量
+      const currentView = viewsMeta.find(view => view.id === viewId);
+      const groupFieldId = currentView?.groupInfo?.[0]?.fieldId;
+      const groupCounts = new Map<string, number>();
+
+      // 预先统计每个分组的数量
+      if (groupFieldId) {
+        allRecords.forEach(record => {
+          const groupValue = record.getCellValueString(groupFieldId) || '无分组';
+          groupCounts.set(groupValue, (groupCounts.get(groupValue) || 0) + 1);
+        });
+      } else {
+        // 无分组情况，统计总数
+        groupCounts.set('无分组', allRecords.length);
+      }
+
+      let lastGroupValue = '';
+
       for (let recordIndex = 0; recordIndex < allRecords.length; recordIndex++) {
         const record = allRecords[recordIndex];
 
-        const rowData = viewFields.map(field =>
+        // 检测分组变化，插入banner row
+        const currentGroupValue = groupFieldId ? (record.getCellValueString(groupFieldId) || '无分组') : '无分组';
+        if (currentGroupValue !== lastGroupValue) {
+          const groupCount = groupCounts.get(currentGroupValue) || 0;
+          const bannerTitle = `${currentGroupValue}(${groupCount})`;
+          const bannerRow = worksheet.addRow([bannerTitle]);
+          worksheet.mergeCells(bannerRow.number, 1, bannerRow.number, viewFields.length);
+          bannerRow.height = GROUP_BANNER_HEIGHT;
+          bannerRow.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
+          bannerRow.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD0D0D0' } };
+          bannerRow.getCell(1).font = { bold: true };
+          bannerRow.getCell(1).border = {
+            right: { style: 'thick', color: { argb: 'FF000000' } }
+          };
+          lastGroupValue = currentGroupValue;
+        }
+
+        // 添加content row
+        const contentRowData = viewFields.map(field =>
           field.type === FieldType.Attachment ? '' : record.getCellValueString(field.id)
         );
-        const row = worksheet.addRow(rowData);
+        const contentRow = worksheet.addRow(contentRowData);
 
+        // 检查content row是否包含附件
         const hasAttachments = viewFields.some(field => {
           const attachments = record.getCellValue(field.id);
           return field.type === FieldType.Attachment && attachments?.[0];
         });
-        row.height = hasAttachments ? ROW_HEIGHT : 15;
 
-        row.eachCell((cell) => {
-          cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: false };
-        });
+        // 设置content row高度
+        if (hasAttachments) {
+          contentRow.height = IMAGE_ROW_HEIGHT;
+        }
+
+        // 设置content row样式和边框
+        for (let colIndex = 1; colIndex <= viewFields.length; colIndex++) {
+          const cell = contentRow.getCell(colIndex);
+          cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+
+          const isLastColumn = colIndex === viewFields.length;
+          const isLastRow = recordIndex === allRecords.length - 1;
+
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FF000000' } },
+            left: { style: 'thin', color: { argb: 'FF000000' } },
+            bottom: isLastRow ? { style: 'thick', color: { argb: 'FF000000' } } : { style: 'thin', color: { argb: 'FF000000' } },
+            right: isLastColumn ? { style: 'thick', color: { argb: 'FF000000' } } : { style: 'thin', color: { argb: 'FF000000' } }
+          };
+        }
 
         // 收集附件任务而不是立即处理
         viewFields.forEach((field, i) => {
           if (field.type === FieldType.Attachment) {
             const attachments = record.getCellValue(field.id);
             if (attachments?.[0]) {
-              attachmentTasks.push({ attachment: attachments[0], workbook, worksheet, row, colIndex: i });
+              attachmentTasks.push({ attachment: attachments[0], workbook, worksheet, row: contentRow, colIndex: i });
             }
           }
         });
